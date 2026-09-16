@@ -67,8 +67,7 @@ local config = {
 local function saveConfig()
     if writefile then
         pcall(function()
-            local json = HttpService:JSONEncode(config)
-            writefile(fileName, json)
+            writefile(fileName, HttpService:JSONEncode(config))
         end)
     end
 end
@@ -76,12 +75,9 @@ end
 local function loadConfig()
     if isfile and readfile and isfile(fileName) then
         pcall(function()
-            local json = readfile(fileName)
-            local loadedData = HttpService:JSONDecode(json)
+            local loadedData = HttpService:JSONDecode(readfile(fileName))
             for key, value in pairs(loadedData) do
-                if config[key] ~= nil then
-                    config[key] = value
-                end
+                if config[key] ~= nil then config[key] = value end
             end
         end)
     end
@@ -90,14 +86,18 @@ end
 loadConfig()
 
 local currentEspColor = Color3.fromRGB(config.espColorR, config.espColorG, config.espColorB)
-local visibleColor = Color3.fromRGB(0, 255, 120) -- Ярко-зеленый при видимости
+local visibleColor = Color3.fromRGB(0, 255, 120)
 local savedPosition = UDim2.new(0.5, -170, 0.5, -190)
 local toggleKeyCode = Enum.KeyCode[config.toggleKey] or Enum.KeyCode.H
 local isBindingKey = false
 
 ----------------------------------------------------
--- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ESP & RAYCAST
+-- ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ESP & RAYCAST
 ----------------------------------------------------
+local visibilityCache = {}
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+raycastParams.IgnoreWater = true
 
 local function playCustomSound(snd)
     if snd then
@@ -117,41 +117,27 @@ local function getDistanceToPlayer(player)
     return math.huge
 end
 
--- ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРОВЕРКИ ВИДИМОСТИ (RAYCAST)
 local function isPlayerVisible(player)
     if not player.Character or not LocalPlayer.Character then return false end
-    
+
+    local now = tick()
+    if visibilityCache[player] and (now - visibilityCache[player].time < 0.1) then
+        return visibilityCache[player].visible
+    end
+
     local targetHead = player.Character:FindFirstChild("Head") or player.Character:FindFirstChild("HumanoidRootPart")
     if not targetHead then return false end
 
-    local raycastParams = RaycastParams.new()
-    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-    
-    -- Игнорируем себя, камеру и все объекты ESP
-    local ignoreList = {LocalPlayer.Character, Camera}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Character then
-            local hl = p.Character:FindFirstChild("ESPHighlight")
-            if hl then table.insert(ignoreList, hl) end
-        end
-    end
-    
-    raycastParams.FilterDescendantsInstances = ignoreList
-    raycastParams.IgnoreWater = true
+    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
 
     local origin = Camera.CFrame.Position
-    local destination = targetHead.Position
-    local direction = (destination - origin)
-    
+    local direction = targetHead.Position - origin
     local result = workspace:Raycast(origin, direction, raycastParams)
 
-    if not result then
-        return true
-    elseif result.Instance:IsDescendantOf(player.Character) then
-        return true
-    end
-
-    return false
+    local isVisible = not result or result.Instance:IsDescendantOf(player.Character)
+    visibilityCache[player] = { visible = isVisible, time = now }
+    
+    return isVisible
 end
 
 local function getPlayerColor(player)
@@ -165,123 +151,102 @@ local function getPlayerColor(player)
 end
 
 local function shouldHighlight(player)
-    if not config.espEnabled then return false end
-    if player == LocalPlayer then return false end
+    if not config.espEnabled or player == LocalPlayer then return false end
     
-    if config.teamCheckEnabled then
-        if player.Team ~= nil and LocalPlayer.Team ~= nil and player.Team == LocalPlayer.Team then
-            return false
-        end
-    end
-
-    local dist = getDistanceToPlayer(player)
-    if dist > config.maxDistance then
+    if config.teamCheckEnabled and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then
         return false
     end
 
-    return true
+    return getDistanceToPlayer(player) <= config.maxDistance
 end
 
 ----------------------------------------------------
--- СИСТЕМА 2D DRAWING
+-- СИСТЕМА 2D DRAWING & ОЧИСТКА
 ----------------------------------------------------
-
 local drawings = {}
 
 local function createDrawingObjects(player)
     if drawings[player] then return drawings[player] end
 
-    local boxOutline = Drawing.new("Square")
-    boxOutline.Visible = false
-    boxOutline.Color = Color3.new(0, 0, 0)
-    boxOutline.Thickness = 3
-    boxOutline.Filled = false
-
-    local box = Drawing.new("Square")
-    box.Visible = false
-    box.Color = Color3.new(1, 1, 1)
-    box.Thickness = 1
-    box.Filled = false
-
-    local healthBarOutline = Drawing.new("Square")
-    healthBarOutline.Visible = false
-    healthBarOutline.Color = Color3.new(0, 0, 0)
-    healthBarOutline.Thickness = 1
-    healthBarOutline.Filled = false
-
-    local healthBarBg = Drawing.new("Square")
-    healthBarBg.Visible = false
-    healthBarBg.Color = Color3.fromRGB(20, 20, 20)
-    healthBarBg.Thickness = 1
-    healthBarBg.Filled = true
-
-    local healthBar = Drawing.new("Square")
-    healthBar.Visible = false
-    healthBar.Color = Color3.new(0, 1, 0)
-    healthBar.Thickness = 1
-    healthBar.Filled = true
-
-    local healthText = Drawing.new("Text")
-    healthText.Visible = false
-    healthText.Color = Color3.new(1, 1, 1)
-    healthText.Size = 13
-    healthText.Center = true
-    healthText.Outline = true
-    healthText.OutlineColor = Color3.new(0, 0, 0)
-
-    local tracer = Drawing.new("Line")
-    tracer.Visible = false
-    tracer.Color = Color3.new(1, 1, 1)
-    tracer.Thickness = 1
-
-    local lookVector = Drawing.new("Line")
-    lookVector.Visible = false
-    lookVector.Color = Color3.fromRGB(255, 50, 50)
-    lookVector.Thickness = 1.5
-
-    drawings[player] = {
-        boxOutline = boxOutline,
-        box = box,
-        healthBarOutline = healthBarOutline,
-        healthBarBg = healthBarBg,
-        healthBar = healthBar,
-        healthText = healthText,
-        tracer = tracer,
-        lookVector = lookVector
+    local objs = {
+        boxOutline = Drawing.new("Square"),
+        box = Drawing.new("Square"),
+        healthBarOutline = Drawing.new("Square"),
+        healthBarBg = Drawing.new("Square"),
+        healthBar = Drawing.new("Square"),
+        healthText = Drawing.new("Text"),
+        tracer = Drawing.new("Line"),
+        lookVector = Drawing.new("Line")
     }
 
-    return drawings[player]
+    objs.boxOutline.Thickness = 3
+    objs.boxOutline.Color = Color3.new(0, 0, 0)
+    objs.box.Thickness = 1
+
+    objs.healthBarOutline.Thickness = 1
+    objs.healthBarOutline.Color = Color3.new(0, 0, 0)
+    objs.healthBarBg.Thickness = 1
+    objs.healthBarBg.Filled = true
+    objs.healthBarBg.Color = Color3.fromRGB(20, 20, 20)
+    objs.healthBar.Thickness = 1
+    objs.healthBar.Filled = true
+
+    objs.healthText.Size = 13
+    objs.healthText.Center = true
+    objs.healthText.Outline = true
+
+    objs.tracer.Thickness = 1
+    objs.lookVector.Thickness = 1.5
+
+    drawings[player] = objs
+    return objs
 end
 
 local function removeDrawingObjects(player)
     if drawings[player] then
-        local data = drawings[player]
-        pcall(function() data.boxOutline:Remove() end)
-        pcall(function() data.box:Remove() end)
-        pcall(function() data.healthBarOutline:Remove() end)
-        pcall(function() data.healthBarBg:Remove() end)
-        pcall(function() data.healthBar:Remove() end)
-        pcall(function() data.healthText:Remove() end)
-        pcall(function() data.tracer:Remove() end)
-        pcall(function() data.lookVector:Remove() end)
+        for _, obj in pairs(drawings[player]) do
+            pcall(function() 
+                obj.Visible = false
+                obj:Remove() 
+            end)
+        end
         drawings[player] = nil
+        visibilityCache[player] = nil
+    end
+end
+
+local function clearPlayerESP(player)
+    removeDrawingObjects(player)
+    if player.Character then
+        local hl = player.Character:FindFirstChild("ESPHighlight")
+        if hl then hl:Destroy() end
+        
+        local head = player.Character:FindFirstChild("Head")
+        if head then
+            local bb = head:FindFirstChild("ESPBillboard")
+            if bb then bb:Destroy() end
+        end
+    end
+end
+
+local function clearAllESP()
+    for _, player in ipairs(Players:GetPlayers()) do
+        clearPlayerESP(player)
     end
 end
 
 local function hideDrawings(drawObjs)
-    drawObjs.boxOutline.Visible = false
-    drawObjs.box.Visible = false
-    drawObjs.healthBarOutline.Visible = false
-    drawObjs.healthBarBg.Visible = false
-    drawObjs.healthBar.Visible = false
-    drawObjs.healthText.Visible = false
-    drawObjs.tracer.Visible = false
-    drawObjs.lookVector.Visible = false
+    for _, obj in pairs(drawObjs) do
+        obj.Visible = false
+    end
 end
 
 local function updateHighlightForPlayer(player)
+    -- Если главный тумблер выключен, выходим моментально без вычислений
+    if not config.espEnabled then return end
+
     if not player.Character then 
-        removeDrawingObjects(player)
+        clearPlayerESP(player)
         return 
     end
 
@@ -290,14 +255,11 @@ local function updateHighlightForPlayer(player)
     local rootPart = character:FindFirstChild("HumanoidRootPart")
     local humanoid = character:FindFirstChildOfClass("Humanoid")
 
-    local highlight = character:FindFirstChild("ESPHighlight")
-    local billboard = head and head:FindFirstChild("ESPBillboard")
-    local drawObjs = createDrawingObjects(player)
-
     if shouldHighlight(player) then
         local playerColor = getPlayerColor(player)
 
         -- Highlight 3D
+        local highlight = character:FindFirstChild("ESPHighlight")
         if not highlight then
             highlight = Instance.new("Highlight")
             highlight.Name = "ESPHighlight"
@@ -308,13 +270,11 @@ local function updateHighlightForPlayer(player)
         highlight.FillColor = playerColor
         highlight.OutlineColor = Color3.fromRGB(0, 0, 0)
         highlight.FillTransparency = config.currentTransparency
-        highlight.OutlineTransparency = 0
-        highlight.Adornee = character
 
         -- Billboard Text ESP
-        local hasAnyTextOption = config.showNameEnabled or config.showHealthEnabled or config.showDistanceEnabled
-
-        if head and hasAnyTextOption then
+        local billboard = head and head:FindFirstChild("ESPBillboard")
+        local hasText = config.showNameEnabled or config.showHealthEnabled or config.showDistanceEnabled
+        if head and hasText then
             if not billboard then
                 billboard = Instance.new("BillboardGui")
                 billboard.Name = "ESPBillboard"
@@ -329,8 +289,6 @@ local function updateHighlightForPlayer(player)
                 textLabel.BackgroundTransparency = 1
                 textLabel.Font = Enum.Font.SourceSansBold
                 textLabel.TextSize = 14
-                textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-                textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
                 textLabel.TextStrokeTransparency = 0
                 textLabel.Parent = billboard
             end
@@ -338,33 +296,19 @@ local function updateHighlightForPlayer(player)
             local infoLabel = billboard:FindFirstChild("InfoLabel")
             if infoLabel then
                 local lines = {}
-
-                if config.showNameEnabled then
-                    local teamName = player.Team and (" [" .. player.Team.Name .. "]") or ""
-                    table.insert(lines, player.DisplayName .. teamName)
-                end
-
-                if config.showHealthEnabled and humanoid then
-                    local health = math.floor(humanoid.Health)
-                    local maxHealth = math.floor(humanoid.MaxHealth)
-                    table.insert(lines, string.format("HP: %d/%d", health, maxHealth))
-                end
-
-                if config.showDistanceEnabled then
-                    local dist = math.floor(getDistanceToPlayer(player))
-                    if dist ~= math.huge then
-                        table.insert(lines, string.format("[%dm]", dist))
-                    end
-                end
-
+                if config.showNameEnabled then table.insert(lines, player.DisplayName) end
+                if config.showHealthEnabled and humanoid then table.insert(lines, string.format("HP: %d", math.floor(humanoid.Health))) end
+                if config.showDistanceEnabled then table.insert(lines, string.format("[%dm]", math.floor(getDistanceToPlayer(player)))) end
+                
                 infoLabel.Text = table.concat(lines, " | ")
                 infoLabel.TextColor3 = playerColor
             end
-        else
-            if billboard then billboard:Destroy() end
+        elseif billboard then
+            billboard:Destroy()
         end
 
         -- 2D Drawing
+        local drawObjs = createDrawingObjects(player)
         if rootPart and humanoid and humanoid.Health > 0 then
             local rootPos, onScreen = Camera:WorldToViewportPoint(rootPart.Position)
 
@@ -410,16 +354,12 @@ local function updateHighlightForPlayer(player)
                     
                     drawObjs.healthBar.Size = Vector2.new(barWidth, healthHeight)
                     drawObjs.healthBar.Position = Vector2.new(barPos.X, barY)
-                    
-                    local r = math.clamp((1 - healthPct) * 2, 0, 1)
-                    local g = math.clamp(healthPct * 2, 0, 1)
-                    drawObjs.healthBar.Color = Color3.new(r, g, 0)
+                    drawObjs.healthBar.Color = Color3.new(math.clamp((1 - healthPct) * 2, 0, 1), math.clamp(healthPct * 2, 0, 1), 0)
                     drawObjs.healthBar.Visible = true
 
                     if healthPct < 0.98 then
                         drawObjs.healthText.Text = tostring(math.floor(humanoid.Health))
                         drawObjs.healthText.Position = Vector2.new(barPos.X - 10, barY - 2)
-                        drawObjs.healthText.Color = Color3.fromRGB(255, 255, 255)
                         drawObjs.healthText.Visible = true
                     else
                         drawObjs.healthText.Visible = false
@@ -431,7 +371,7 @@ local function updateHighlightForPlayer(player)
                     drawObjs.healthText.Visible = false
                 end
 
-                -- Tracer Lines
+                -- Tracers
                 if config.tracersEnabled then
                     drawObjs.tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
                     drawObjs.tracer.To = Vector2.new(rootPos.X, rootPos.Y)
@@ -443,8 +383,7 @@ local function updateHighlightForPlayer(player)
 
                 -- Look Vector
                 if config.lookVectorEnabled and head then
-                    local headCFrame = head.CFrame
-                    local lookTarget = headCFrame.Position + (headCFrame.LookVector * 6)
+                    local lookTarget = head.CFrame.Position + (head.CFrame.LookVector * 6)
                     local targetScreen, lookOnScreen = Camera:WorldToViewportPoint(lookTarget)
 
                     if lookOnScreen then
@@ -466,34 +405,27 @@ local function updateHighlightForPlayer(player)
             hideDrawings(drawObjs)
         end
     else
-        if highlight then highlight:Destroy() end
-        if billboard then billboard:Destroy() end
-        removeDrawingObjects(player)
+        clearPlayerESP(player)
     end
 end
 
 local function updateAllESP()
+    -- Полное отключение обработчика, если модуль отключен
+    if not config.espEnabled then return end
+
     for _, player in ipairs(Players:GetPlayers()) do
-        updateHighlightForPlayer(player)
+        if player ~= LocalPlayer then 
+            updateHighlightForPlayer(player) 
+        end
     end
 end
 
-RunService.RenderStepped:Connect(function()
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            updateHighlightForPlayer(player)
-        end
-    end
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-    removeDrawingObjects(player)
-end)
+RunService.RenderStepped:Connect(updateAllESP)
+Players.PlayerRemoving:Connect(clearPlayerESP)
 
 ----------------------------------------------------
 -- СОЗДАНИЕ ИНТЕРФЕЙСА (С АНИМАЦИЕЙ И БЛЮРОМ)
 ----------------------------------------------------
-
 local playerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local screenGui = Instance.new("ScreenGui")
@@ -512,9 +444,7 @@ mainFrame.Active = true
 mainFrame.ClipsDescendants = true
 mainFrame.Parent = screenGui
 
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 10)
-mainCorner.Parent = mainFrame
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
 
 local mainStroke = Instance.new("UIStroke")
 mainStroke.Color = Color3.fromRGB(255, 200, 0)
@@ -532,39 +462,29 @@ titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Active = true
 titleLabel.Parent = mainFrame
 
-local titleCorner = Instance.new("UICorner")
-titleCorner.CornerRadius = UDim.new(0, 10)
-titleCorner.Parent = titleLabel
+Instance.new("UICorner", titleLabel).CornerRadius = UDim.new(0, 10)
 
--- Перетаскивание меню
-local dragging, dragInput, dragStart, startPos
-
+-- Перетаскивание
+local dragging, dragStart, startPos
 titleLabel.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
         startPos = mainFrame.Position
-
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
-end)
-
-titleLabel.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
     end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-    if input == dragInput and dragging then
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
-        local newPos = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        mainFrame.Position = newPos
-        savedPosition = newPos
+        savedPosition = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        mainFrame.Position = savedPosition
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
     end
 end)
 
@@ -579,11 +499,8 @@ closeBtn.TextSize = 14
 closeBtn.ZIndex = 2
 closeBtn.Parent = mainFrame
 
-local closeCorner = Instance.new("UICorner")
-closeCorner.CornerRadius = UDim.new(0, 6)
-closeCorner.Parent = closeBtn
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
 
--- Эффект Hover для кнопок
 local function addHoverEffect(button, defaultBg, hoverBg)
     button.MouseEnter:Connect(function()
         TweenService:Create(button, TweenInfo.new(0.15), {BackgroundColor3 = hoverBg}):Play()
@@ -595,7 +512,7 @@ end
 
 addHoverEffect(closeBtn, Color3.fromRGB(40, 40, 40), Color3.fromRGB(200, 40, 40))
 
--- ВКЛАДКИ (TABS)
+-- Вкладки
 local tabBar = Instance.new("Frame")
 tabBar.Size = UDim2.new(1, -20, 0, 26)
 tabBar.Position = UDim2.new(0, 10, 0, 42)
@@ -604,7 +521,6 @@ tabBar.Parent = mainFrame
 
 local tabMainBtn = Instance.new("TextButton")
 tabMainBtn.Size = UDim2.new(0.49, 0, 1, 0)
-tabMainBtn.Position = UDim2.new(0, 0, 0, 0)
 tabMainBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
 tabMainBtn.Text = "Main Settings"
 tabMainBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
@@ -641,19 +557,15 @@ visualsTabFrame.Parent = mainFrame
 tabMainBtn.MouseButton1Click:Connect(function()
     mainTabFrame.Visible = true
     visualsTabFrame.Visible = false
-    tabMainBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-    tabMainBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
-    tabVisualsBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-    tabVisualsBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+    tabMainBtn.BackgroundColor3, tabMainBtn.TextColor3 = Color3.fromRGB(35, 35, 35), Color3.fromRGB(255, 215, 0)
+    tabVisualsBtn.BackgroundColor3, tabVisualsBtn.TextColor3 = Color3.fromRGB(25, 25, 25), Color3.fromRGB(150, 150, 150)
 end)
 
 tabVisualsBtn.MouseButton1Click:Connect(function()
     mainTabFrame.Visible = false
     visualsTabFrame.Visible = true
-    tabVisualsBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-    tabVisualsBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
-    tabMainBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-    tabMainBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+    tabVisualsBtn.BackgroundColor3, tabVisualsBtn.TextColor3 = Color3.fromRGB(35, 35, 35), Color3.fromRGB(255, 215, 0)
+    tabMainBtn.BackgroundColor3, tabMainBtn.TextColor3 = Color3.fromRGB(25, 25, 25), Color3.fromRGB(150, 150, 150)
 end)
 
 local function createGridToggleButton(text, configKey, parent, pos)
@@ -665,10 +577,7 @@ local function createGridToggleButton(text, configKey, parent, pos)
     button.TextSize = 12
     button.Parent = parent
 
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 5)
-    btnCorner.Parent = button
-
+    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 5)
     local btnStroke = Instance.new("UIStroke")
     btnStroke.Thickness = 1
     btnStroke.Parent = button
@@ -693,7 +602,13 @@ local function createGridToggleButton(text, configKey, parent, pos)
         config[configKey] = not config[configKey]
         saveConfig()
         updateState()
-        updateAllESP()
+
+        -- Если главный тумблер был выключен, вычищаем всё с экрана
+        if configKey == "espEnabled" and not config.espEnabled then
+            clearAllESP()
+        else
+            updateAllESP()
+        end
     end)
 
     return button
@@ -709,86 +624,86 @@ createGridToggleButton("Show Health", "showHealthEnabled", mainTabFrame, UDim2.n
 
 local sliderY = 98
 
--- Transparency Slider
-local transFrame = Instance.new("Frame")
-transFrame.Size = UDim2.new(1, 0, 0, 35)
-transFrame.Position = UDim2.new(0, 0, 0, sliderY)
-transFrame.BackgroundTransparency = 1
-transFrame.Parent = mainTabFrame
+-- Слайдеры
+local function createSlider(title, min, max, currentVal, pos, onUpdate)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 35)
+    frame.Position = pos
+    frame.BackgroundTransparency = 1
+    frame.Parent = mainTabFrame
 
-local transLabel = Instance.new("TextLabel")
-transLabel.Size = UDim2.new(1, 0, 0, 14)
-transLabel.BackgroundTransparency = 1
-transLabel.Text = string.format("Transparency: %d%%", math.floor(config.currentTransparency * 100))
-transLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
-transLabel.Font = Enum.Font.SourceSans
-transLabel.TextSize = 13
-transLabel.Parent = transFrame
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 0, 14)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 215, 0)
+    label.Font = Enum.Font.SourceSans
+    label.TextSize = 13
+    label.Parent = frame
 
-local sliderBg = Instance.new("TextButton")
-sliderBg.Text = ""
-sliderBg.AutoButtonColor = false
-sliderBg.Size = UDim2.new(1, 0, 0, 6)
-sliderBg.Position = UDim2.new(0, 0, 0, 18)
-sliderBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-sliderBg.Parent = transFrame
+    local sliderBg = Instance.new("TextButton")
+    sliderBg.Text = ""
+    sliderBg.AutoButtonColor = false
+    sliderBg.Size = UDim2.new(1, 0, 0, 6)
+    sliderBg.Position = UDim2.new(0, 0, 0, 18)
+    sliderBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    sliderBg.Parent = frame
+    Instance.new("UICorner", sliderBg).CornerRadius = UDim.new(1, 0)
 
-Instance.new("UICorner", sliderBg).CornerRadius = UDim.new(1, 0)
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new((currentVal - min) / (max - min), 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+    fill.Parent = sliderBg
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
 
-local sliderFill = Instance.new("Frame")
-sliderFill.Size = UDim2.new(config.currentTransparency, 0, 1, 0)
-sliderFill.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
-sliderFill.Parent = sliderBg
-Instance.new("UICorner", sliderFill).CornerRadius = UDim.new(1, 0)
+    local isSliding = false
+    local function update(input)
+        local scale = math.clamp((input.Position.X - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
+        fill.Size = UDim2.new(scale, 0, 1, 0)
+        local val = min + scale * (max - min)
+        label.Text = string.format("%s: %d", title, math.floor(val))
+        onUpdate(val)
+    end
 
--- Max Distance Slider
-local distFrame = Instance.new("Frame")
-distFrame.Size = UDim2.new(1, 0, 0, 35)
-distFrame.Position = UDim2.new(0, 0, 0, sliderY + 36)
-distFrame.BackgroundTransparency = 1
-distFrame.Parent = mainTabFrame
+    sliderBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isSliding = true
+            update(input)
+        end
+    end)
 
-local distLabel = Instance.new("TextLabel")
-distLabel.Size = UDim2.new(1, 0, 0, 14)
-distLabel.BackgroundTransparency = 1
-distLabel.Text = string.format("Max Distance: %dm", config.maxDistance)
-distLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
-distLabel.Font = Enum.Font.SourceSans
-distLabel.TextSize = 13
-distLabel.Parent = distFrame
+    UserInputService.InputChanged:Connect(function(input)
+        if isSliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            update(input)
+        end
+    end)
 
-local distSliderBg = Instance.new("TextButton")
-distSliderBg.Text = ""
-distSliderBg.AutoButtonColor = false
-distSliderBg.Size = UDim2.new(1, 0, 0, 6)
-distSliderBg.Position = UDim2.new(0, 0, 0, 18)
-distSliderBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-distSliderBg.Parent = distFrame
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isSliding = false
+        end
+    end)
 
-Instance.new("UICorner", distSliderBg).CornerRadius = UDim.new(1, 0)
+    label.Text = string.format("%s: %d", title, math.floor(currentVal))
+end
 
-local minDistVal, maxDistVal = 50, 1000
-local distSliderFill = Instance.new("Frame")
-distSliderFill.Size = UDim2.new((config.maxDistance - minDistVal) / (maxDistVal - minDistVal), 0, 1, 0)
-distSliderFill.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
-distSliderFill.Parent = distSliderBg
-Instance.new("UICorner", distSliderFill).CornerRadius = UDim.new(1, 0)
+createSlider("Transparency", 0, 100, config.currentTransparency * 100, UDim2.new(0, 0, 0, sliderY), function(val)
+    config.currentTransparency = val / 100
+    saveConfig()
+    updateAllESP()
+end)
 
--- Палитра цветов
+createSlider("Max Distance", 50, 1000, config.maxDistance, UDim2.new(0, 0, 0, sliderY + 36), function(val)
+    config.maxDistance = math.floor(val)
+    saveConfig()
+    updateAllESP()
+end)
+
+-- Палитра
 local paletteFrame = Instance.new("Frame")
 paletteFrame.Size = UDim2.new(1, 0, 0, 80)
 paletteFrame.Position = UDim2.new(0, 0, 0, sliderY + 74)
 paletteFrame.BackgroundTransparency = 1
 paletteFrame.Parent = mainTabFrame
-
-local paletteTitle = Instance.new("TextLabel")
-paletteTitle.Size = UDim2.new(1, 0, 0, 12)
-paletteTitle.BackgroundTransparency = 1
-paletteTitle.Text = "Custom Color:"
-paletteTitle.TextColor3 = Color3.fromRGB(255, 215, 0)
-paletteTitle.Font = Enum.Font.SourceSans
-paletteTitle.TextSize = 13
-paletteTitle.Parent = paletteFrame
 
 local paletteContainer = Instance.new("Frame")
 paletteContainer.Size = UDim2.new(0, 68, 0, 68)
@@ -818,12 +733,9 @@ local presetColors = {
 
 for i, color in ipairs(presetColors) do
     local angle = (i - 1) * (2 * math.pi / #presetColors) - (math.pi / 2)
-    local x = math.cos(angle) * 22
-    local y = math.sin(angle) * 22
-
     local colorBtn = Instance.new("TextButton")
     colorBtn.Size = UDim2.new(0, 12, 0, 12)
-    colorBtn.Position = UDim2.new(0.5, x - 6, 0.5, y - 6)
+    colorBtn.Position = UDim2.new(0.5, math.cos(angle) * 22 - 6, 0.5, math.sin(angle) * 22 - 6)
     colorBtn.BackgroundColor3 = color
     colorBtn.Text = ""
     colorBtn.Parent = paletteContainer
@@ -832,9 +744,7 @@ for i, color in ipairs(presetColors) do
     colorBtn.MouseButton1Click:Connect(function()
         currentEspColor = color
         centerColorIndicator.BackgroundColor3 = color
-        config.espColorR = math.floor(color.R * 255)
-        config.espColorG = math.floor(color.G * 255)
-        config.espColorB = math.floor(color.B * 255)
+        config.espColorR, config.espColorG, config.espColorB = math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255)
         saveConfig()
         updateAllESP()
     end)
@@ -846,7 +756,7 @@ createGridToggleButton("Healthbar", "healthbarEnabled", visualsTabFrame, UDim2.n
 createGridToggleButton("Tracer Lines", "tracersEnabled", visualsTabFrame, UDim2.new(0, 0, 0, 32))
 createGridToggleButton("Look Vector", "lookVectorEnabled", visualsTabFrame, UDim2.new(0.515, 0, 0, 32))
 
--- Keybind кнопка внизу
+-- Keybind Button
 local bindButton = Instance.new("TextButton")
 bindButton.Size = UDim2.new(1, -20, 0, 26)
 bindButton.Position = UDim2.new(0, 10, 1, -34)
@@ -868,63 +778,11 @@ bindButton.MouseButton1Click:Connect(function()
 end)
 
 ----------------------------------------------------
--- ОБРАБОТКА СЛАЙДЕРОВ И ВВОДА
+-- АНИМАЦИИ И УПРАВЛЕНИЕ МЕНЮ
 ----------------------------------------------------
-local isSlidingTrans, isSlidingDist = false, false
-
-local function updateTransSlider(input)
-    local relX = input.Position.X - sliderBg.AbsolutePosition.X
-    local scale = math.clamp(relX / sliderBg.AbsoluteSize.X, 0, 1)
-    sliderFill.Size = UDim2.new(scale, 0, 1, 0)
-    config.currentTransparency = scale
-    transLabel.Text = string.format("Transparency: %d%%", math.floor(scale * 100))
-    saveConfig()
-    updateAllESP()
-end
-
-local function updateDistSlider(input)
-    local relX = input.Position.X - distSliderBg.AbsolutePosition.X
-    local scale = math.clamp(relX / distSliderBg.AbsoluteSize.X, 0, 1)
-    distSliderFill.Size = UDim2.new(scale, 0, 1, 0)
-    config.maxDistance = math.floor(minDistVal + scale * (maxDistVal - minDistVal))
-    distLabel.Text = string.format("Max Distance: %dm", config.maxDistance)
-    saveConfig()
-    updateAllESP()
-end
-
-sliderBg.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isSlidingTrans = true
-        updateTransSlider(input)
-    end
-end)
-
-distSliderBg.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isSlidingDist = true
-        updateDistSlider(input)
-    end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        if isSlidingTrans then updateTransSlider(input) end
-        if isSlidingDist then updateDistSlider(input) end
-    end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isSlidingTrans = false
-        isSlidingDist = false
-    end
-end)
-
--- Открытие / Закрытие (С БЛЮРОМ)
 local isMenuOpen = true
 local isAnimating = false
 
--- Включаем блюр по умолчанию при запуске
 TweenService:Create(menuBlur, TweenInfo.new(0.25), {Size = 12}):Play()
 
 local function toggleMenu()
@@ -970,48 +828,15 @@ end
 
 closeBtn.MouseButton1Click:Connect(toggleMenu)
 
-----------------------------------------------------
--- ИНИЦИАЛИЗАЦИЯ И ОБРАБОТКА ИГРОКОВ
-----------------------------------------------------
-
-local function setupPlayer(player)
-    if player == LocalPlayer then return end
-
-    player.CharacterAdded:Connect(function(character)
-        character:WaitForChild("HumanoidRootPart", 10)
-        task.wait(0.1)
-        updateHighlightForPlayer(player)
-    end)
-
-    player:GetPropertyChangedSignal("Team"):Connect(function()
-        updateHighlightForPlayer(player)
-    end)
-end
-
-for _, player in ipairs(Players:GetPlayers()) do
-    setupPlayer(player)
-    if player.Character then updateHighlightForPlayer(player) end
-end
-
-Players.PlayerAdded:Connect(setupPlayer)
-
-LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
-    updateAllESP()
-end)
-
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if isBindingKey then
         if input.UserInputType == Enum.UserInputType.Keyboard then
             toggleKeyCode = input.KeyCode
             config.toggleKey = input.KeyCode.Name
             saveConfig()
-            
             bindButton.Text = "Menu Keybind: [" .. config.toggleKey .. "]"
             bindButton.TextColor3 = Color3.fromRGB(255, 215, 0)
-            
-            task.delay(0.1, function()
-                isBindingKey = false
-            end)
+            task.delay(0.1, function() isBindingKey = false end)
         end
     elseif not gameProcessed and input.KeyCode == toggleKeyCode then
         toggleMenu()
